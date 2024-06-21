@@ -30,7 +30,6 @@ procinit(void)
   initlock(&pid_lock, "nextpid");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
-
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
@@ -121,6 +120,19 @@ found:
     return 0;
   }
 
+  p->vpagetable = v_kvminit();
+  if(p->vpagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  char *pa = kalloc();
+  if(pa == 0)
+    panic("kalloc");
+  uint64 va = KSTACK((int) (p - proc));
+  v_kvmmap(p->vpagetable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -150,6 +162,13 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+
+  uvmunmap(p->vpagetable, p->kstack, 1, 1);
+  p->kstack = 0;
+
+  if(p->vpagetable)
+    v_freewalk(p->vpagetable);
+  p->vpagetable = 0;
 }
 
 // Create a user page table for a given process,
@@ -473,8 +492,13 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        w_satp(MAKE_SATP(p->vpagetable));
+        sfence_vma();
+
         swtch(&c->context, &p->context);
 
+        kvminithart();
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;

@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -14,6 +16,21 @@ pagetable_t kernel_pagetable;
 extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
+
+pagetable_t 
+v_kvminit() 
+{ 
+  pagetable_t p = (pagetable_t) kalloc();
+  memset(p, 0, PGSIZE);
+  v_kvmmap(p, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+  v_kvmmap(p, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+  v_kvmmap(p, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+  v_kvmmap(p, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+  v_kvmmap(p, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+  v_kvmmap(p, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+  v_kvmmap(p, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+  return p;
+}
 
 /*
  * create a direct-map page table for the kernel.
@@ -111,6 +128,13 @@ walkaddr(pagetable_t pagetable, uint64 va)
   return pa;
 }
 
+void
+v_kvmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm)
+{
+  if(mappages(pagetable, va, sz, pa, perm) != 0)
+    panic("kvmmap");
+}
+
 // add a mapping to the kernel page table.
 // only used when booting.
 // does not flush TLB or enable paging.
@@ -132,7 +156,7 @@ kvmpa(uint64 va)
   pte_t *pte;
   uint64 pa;
   
-  pte = walk(kernel_pagetable, va, 0);
+  pte = walk(myproc()->vpagetable, va, 0);
   if(pte == 0)
     panic("kvmpa");
   if((*pte & PTE_V) == 0)
@@ -267,6 +291,22 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
   }
 
   return newsz;
+}
+
+void
+v_freewalk(pagetable_t pagetable)
+{
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      uint64 child = PTE2PA(pte);
+      v_freewalk((pagetable_t)child);
+      pagetable[i] = 0;
+    } else if(pte & PTE_V){
+      pagetable[i] = 0;
+    }
+  }
+  kfree((void*)pagetable);
 }
 
 // Recursively free page-table pages.
@@ -439,4 +479,25 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+void vmprint_t(pagetable_t p, int level) {
+  if(level > 2) return;
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = p[i];
+    if(pte & PTE_V) {
+      printf("..");
+      for (int i = 0; i < level; i++)
+        printf(" ..");
+      uint64 child = PTE2PA(pte);
+      printf("%d: pte %p pa %p\n", i, pte, child);
+      vmprint_t((pagetable_t)child, level + 1);
+    }
+  }
+}
+
+void 
+vmprint(pagetable_t p) {
+  printf("page table %p\n", p);
+  vmprint_t(p, 0);
 }
