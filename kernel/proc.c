@@ -249,6 +249,8 @@ userinit(void)
 
   p->state = RUNNABLE;
 
+  u2kvmcopy(p->pagetable, p->vpagetable, 0, p->sz);
+
   release(&p->lock);
 }
 
@@ -262,9 +264,12 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
+    if(PGROUNDDOWN(sz + n) >= PLIC)
+      return -1;
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    u2kvmcopy(p->pagetable, p->vpagetable, sz - n, sz);
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
@@ -307,6 +312,8 @@ fork(void)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
+
+  u2kvmcopy(np->pagetable, np->vpagetable, 0, np->sz);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
